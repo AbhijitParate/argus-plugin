@@ -1,0 +1,95 @@
+name: Branch Rules
+
+# Enforce the Argus branch model:
+#   Feature branches (m/{milestone}-issue-{N}-{slug}) → target milestone branch (m/{milestone})
+#   Milestone branches (m/{milestone}) → target dev
+#   No PRs directly to main
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch conventions
+        env:
+          HEAD: ${{ github.head_ref }}
+          BASE: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUES=""
+
+          # Rule 1: No PRs to main
+          if [ "$BASE" = "main" ]; then
+            ISSUES="$ISSUES\n- **PR targets \`main\`.** Direct PRs to \`main\` are not allowed. Milestone branches merge to \`dev\`, then \`dev\` merges to \`main\` for releases."
+          fi
+
+          # Rule 2: Feature branches must follow naming convention
+          # Pattern: m/{milestone}-issue-{N}-{slug}
+          if echo "$HEAD" | grep -qP '^m/'; then
+            # It's a milestone-related branch
+            if echo "$HEAD" | grep -qP '^m/[^-]+-issue-\d+-'; then
+              # Feature branch — must target its milestone branch
+              MILESTONE=$(echo "$HEAD" | sed -E 's|^m/([^-]+)-issue-.*|\1|')
+              EXPECTED_BASE="m/$MILESTONE"
+              if [ "$BASE" != "$EXPECTED_BASE" ]; then
+                ISSUES="$ISSUES\n- **Wrong PR target.** Feature branch \`$HEAD\` should target \`$EXPECTED_BASE\`, not \`$BASE\`. Feature branches PR to their milestone branch."
+              fi
+            elif echo "$HEAD" | grep -qP '^m/[a-z]+-'; then
+              # Could be a milestone branch variant (e.g. m/helios-chat-wireup)
+              # These should target the base milestone branch or dev
+              : # Allow — these are flexible
+            else
+              # Bare milestone branch (m/helios) — should target dev
+              if [ "$BASE" != "dev" ]; then
+                ISSUES="$ISSUES\n- **Wrong PR target.** Milestone branch \`$HEAD\` should target \`dev\`, not \`$BASE\`."
+              fi
+            fi
+          fi
+
+          # Rule 3: Validate merge strategy hint
+          # Feature → milestone: should be squash merge
+          # Milestone → dev: should be regular merge
+          if echo "$HEAD" | grep -qP '^m/[^-]+-issue-\d+-'; then
+            MERGE_HINT="squash"
+          elif echo "$HEAD" | grep -qP '^m/[a-z]+$'; then
+            MERGE_HINT="merge"
+          else
+            MERGE_HINT=""
+          fi
+
+          if [ -z "$ISSUES" ]; then
+            echo "All branch rules pass."
+            if [ -n "$MERGE_HINT" ]; then
+              echo "Recommended merge strategy: $MERGE_HINT"
+            fi
+          else
+            echo -e "Branch rule violations found:$ISSUES"
+
+            # Post comment on PR
+            COMMENT="## Branch Rules
+
+            Found branch convention issues:
+            $(echo -e "$ISSUES")
+
+            See \`CLAUDE.md\` for the branch model:
+            \`\`\`
+            main ← dev ← m/{milestone} ← m/{milestone}-issue-{N}-{slug}
+            \`\`\`
+
+            *This comment is from the branch rules action.*"
+
+            # Check if we already posted
+            EXISTING=$(gh pr view "$PR_NUMBER" --json comments --jq '.comments[] | select(.body | contains("Branch Rules")) | .id' | head -1)
+            if [ -z "$EXISTING" ]; then
+              gh pr comment "$PR_NUMBER" --body "$COMMENT"
+            fi
+
+            exit 1
+          fi

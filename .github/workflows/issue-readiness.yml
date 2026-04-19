@@ -1,0 +1,140 @@
+name: Issue Readiness Check
+
+# Validate issue completeness when it's in Ready status on the project board.
+# Augments /review-spec by catching structural gaps automatically.
+#
+# Project board IDs are read from .argus/project.json — no hardcoded values.
+
+on:
+  schedule:
+    - cron: '*/30 8-20 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  repository-projects: read
+
+jobs:
+  check-ready-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .argus/project.json
+          sparse-checkout-cone-mode: false
+
+      - name: Load project config
+        id: config
+        run: |
+          if [ ! -f .argus/project.json ]; then
+            echo "No .argus/project.json found. Skipping."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "project_number=$(jq -r '.project.number' .argus/project.json)" >> "$GITHUB_OUTPUT"
+          echo "status_ready=$(jq -r '.fields.status.options.ready.id' .argus/project.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch and check Ready issues
+        if: steps.config.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROJECT_NUM: ${{ steps.config.outputs.project_number }}
+          READY_ID: ${{ steps.config.outputs.status_ready }}
+        run: |
+          # Fetch all project items
+          gh api graphql -f query='
+            query($owner: String!, $project: Int!) {
+              user(login: $owner) {
+                projectV2(number: $project) {
+                  items(first: 100) {
+                    nodes {
+                      id
+                      fieldValueByName(name: "Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue {
+                          optionId
+                        }
+                      }
+                      content {
+                        ... on Issue {
+                          number
+                          title
+                          body
+                          labels(first: 20) {
+                            nodes { name }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f owner="${{ github.repository_owner }}" -F project="$PROJECT_NUM" > /tmp/project_items.json
+
+          # Check each Ready item
+          python3 << PYEOF
+          import json, subprocess, os
+
+          ready_id = os.environ['READY_ID']
+
+          with open('/tmp/project_items.json') as f:
+              data = json.load(f)
+
+          items = data['data']['user']['projectV2']['items']['nodes']
+          issues_with_problems = []
+
+          for item in items:
+              field = item.get('fieldValueByName')
+              if not field or field.get('optionId') != ready_id:
+                  continue
+              content = item.get('content')
+              if not content or not content.get('number'):
+                  continue
+
+              number = content['number']
+              title = content['title']
+              body = content.get('body', '') or ''
+              labels = [l['name'] for l in content.get('labels', {}).get('nodes', [])]
+
+              problems = []
+              if len(body.strip()) < 50:
+                  problems.append('Description is too short (stub)')
+              has_ac = any(m in body.lower() for m in ['acceptance criteria', '- [ ]', '- [x]', 'given', 'when', 'then'])
+              if not has_ac:
+                  problems.append('Missing acceptance criteria')
+              if not any(l.startswith('size:') for l in labels):
+                  problems.append('Missing size label')
+              if not any(l.startswith('scope:') for l in labels):
+                  problems.append('Missing scope label')
+              if not any(l in ('feature', 'chore', 'bug') for l in labels):
+                  problems.append('Missing type label (feature/chore/bug)')
+
+              if problems:
+                  issues_with_problems.append({'number': number, 'title': title, 'problems': problems})
+
+          for issue in issues_with_problems:
+              num = issue['number']
+              # Check if we already posted recently
+              result = subprocess.run(
+                  ['gh', 'issue', 'view', str(num), '--json', 'comments', '--jq', '.comments[-1].body'],
+                  capture_output=True, text=True
+              )
+              if 'Issue Readiness Check' in (result.stdout or ''):
+                  print(f"  #{num}: already has readiness comment, skipping")
+                  continue
+
+              body = "## Issue Readiness Check\n\n"
+              body += "This issue is marked **Ready** but has structural gaps:\n\n"
+              for p in issue['problems']:
+                  body += f"- {p}\n"
+              body += "\nPlease fix these before an Engineer picks it up.\n\n"
+              body += "*This comment is from the issue readiness action.*"
+
+              subprocess.run(['gh', 'issue', 'comment', str(num), '--body', body], check=True)
+              print(f"  #{num}: posted readiness comment")
+
+          if not issues_with_problems:
+              print("All Ready issues pass structural checks.")
+          PYEOF

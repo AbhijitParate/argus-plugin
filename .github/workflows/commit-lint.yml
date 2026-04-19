@@ -1,0 +1,75 @@
+name: Commit Lint
+
+# Validate that PR title (used as squash commit message) follows conventions:
+#   - Lowercase (no leading uppercase)
+#   - No conventional-commit prefixes unless it's a recognized type
+#   - Reasonable length (under 72 chars for the first line)
+
+on:
+  pull_request:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  lint:
+    # Skip for milestone merge PRs (m/helios → dev) — these aren't squash-merged
+    if: ${{ !startsWith(github.head_ref, 'm/') || contains(github.head_ref, '-issue-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check PR title format
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUES=""
+
+          # Rule 1: Title should start with lowercase (or # for issue references)
+          FIRST_CHAR=$(echo "$TITLE" | head -c1)
+          if echo "$FIRST_CHAR" | grep -qP '[A-Z]'; then
+            # Allow if it starts with a recognized prefix like "Helios:" or issue ref
+            if ! echo "$TITLE" | grep -qP '^(#\d|[A-Z][a-z]+:)'; then
+              ISSUES="$ISSUES\n- **Title starts with uppercase.** Commit messages should be lowercase: \`$FIRST_CHAR\` → \`$(echo "$FIRST_CHAR" | tr '[:upper:]' '[:lower:]')\`"
+            fi
+          fi
+
+          # Rule 2: Length check
+          TITLE_LEN=${#TITLE}
+          if [ "$TITLE_LEN" -gt 72 ]; then
+            ISSUES="$ISSUES\n- **Title too long** ($TITLE_LEN chars). Keep under 72 characters for clean git log output."
+          fi
+
+          # Rule 3: No trailing period
+          if echo "$TITLE" | grep -qP '\.$'; then
+            ISSUES="$ISSUES\n- **Title ends with a period.** Commit messages don't need trailing punctuation."
+          fi
+
+          if [ -z "$ISSUES" ]; then
+            echo "PR title looks good: $TITLE"
+          else
+            echo -e "PR title issues found:$ISSUES"
+
+            COMMENT="## Commit Lint
+
+            The PR title is used as the squash commit message. Found some issues:
+            $(echo -e "$ISSUES")
+
+            Convention: \`{what was done in lowercase}\`
+            Examples: \`add token-refresh middleware\`, \`fix off-by-one in pagination\`, \`#42: implement auth flow\`
+
+            *This comment is from the commit lint action.*"
+
+            EXISTING=$(gh pr view "$PR_NUMBER" --json comments --jq '.comments[] | select(.body | contains("Commit Lint")) | .id' | head -1)
+            if [ -z "$EXISTING" ]; then
+              gh pr comment "$PR_NUMBER" --body "$COMMENT"
+            fi
+
+            # Warn but don't fail — title can be fixed before merge
+            echo "::warning::PR title has formatting issues. See PR comment."
+          fi

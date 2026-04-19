@@ -1,0 +1,54 @@
+name: Feature
+description: New feature or enhancement — used by Manager (/plan-milestone) and Architect (/spec-issue)
+title: ""
+labels: ["feature"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What exists today? Why is this change needed?
+      placeholder: Describe the current state and the motivation for this change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: The concrete work, broken into steps. Each step should be actionable by an Engineer.
+      placeholder: |
+        1. Add X to Y
+        2. Update Z to handle the new case
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: Testable statements. Each criterion should be verifiable as pass/fail.
+      placeholder: |
+        - [ ] Given X, when Y, then Z
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Issues that must be complete before this one can start.
+      placeholder: "Blocked by #N, #M (optional)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this issue explicitly does NOT cover.
+      placeholder: "Not addressing X, Y — separate issue if needed (optional)"
+    validations:
+      required: false

@@ -1,0 +1,93 @@
+name: PR Quality Gate
+
+# Validate PR structure on open/edit. Posts comments for missing elements.
+# Augments /review-pr by catching structural issues before a reviewer looks.
+
+on:
+  pull_request:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+
+jobs:
+  validate:
+    # Skip for milestone merge PRs (m/helios → dev) — these don't link individual issues
+    if: ${{ !startsWith(github.head_ref, 'm/') || contains(github.head_ref, '-issue-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check PR structure
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          ISSUES=""
+
+          # 1. Check for "Closes #N" link
+          if ! echo "$PR_BODY" | grep -iqP '(closes|fixes|resolves)\s+#\d+'; then
+            ISSUES="$ISSUES\n- **Missing issue link.** Add \`Closes #N\` to the PR body so the issue auto-closes on merge."
+          fi
+
+          # 2. Check AC coverage section is populated
+          if ! echo "$PR_BODY" | grep -q '\[.\]'; then
+            ISSUES="$ISSUES\n- **AC coverage is empty.** Add checkboxes mapping each acceptance criterion to what was done."
+          fi
+
+          # 3. Check "What changed" section has content
+          if echo "$PR_BODY" | grep -qP '## What changed\s*$'; then
+            ISSUES="$ISSUES\n- **'What changed' is empty.** Briefly describe what the diff does."
+          fi
+
+          # 4. If linked issue exists, check it has AC
+          ISSUE_NUM=$(echo "$PR_BODY" | grep -ioP '(closes|fixes|resolves)\s+#\K\d+' | head -1)
+          if [ -n "$ISSUE_NUM" ]; then
+            ISSUE_BODY=$(gh issue view "$ISSUE_NUM" --json body --jq '.body' 2>/dev/null || echo "")
+            if [ -n "$ISSUE_BODY" ] && ! echo "$ISSUE_BODY" | grep -qiP '(acceptance criteria|\[.\])'; then
+              ISSUES="$ISSUES\n- **Linked issue #$ISSUE_NUM has no acceptance criteria.** The spec may need work — consider pinging the Architect."
+              # Add label to flag it
+              gh issue edit "$ISSUE_NUM" --add-label "needs-spec" 2>/dev/null || true
+            fi
+          fi
+
+          if [ -z "$ISSUES" ]; then
+            echo "has_issues=false" >> "$GITHUB_OUTPUT"
+            echo "All checks passed."
+          else
+            echo "has_issues=true" >> "$GITHUB_OUTPUT"
+            # Write issues to a file to preserve newlines
+            echo -e "$ISSUES" > /tmp/pr_issues.txt
+            echo "Found issues in PR structure."
+          fi
+
+      - name: Post comment if issues found
+        if: steps.check.outputs.has_issues == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          ISSUES=$(cat /tmp/pr_issues.txt)
+          COMMENT="## PR Quality Gate
+
+          Found some structural issues with this PR:
+
+          $ISSUES
+
+          These are automated checks — fix what applies, ignore what doesn't.
+
+          *This comment is from the PR quality gate action.*"
+
+          # Check if we already posted a quality gate comment (avoid spam on edits)
+          EXISTING=$(gh pr view "$PR_NUMBER" --json comments --jq '.comments[] | select(.body | contains("PR Quality Gate")) | .id' | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Quality gate comment already exists. Skipping duplicate."
+          else
+            gh pr comment "$PR_NUMBER" --body "$COMMENT"
+          fi
